@@ -455,6 +455,7 @@ export default Vue.extend({
         { event: AppEvent.beginImport, handler: this.beginImport },
         { event: AppEvent.restoreDatabase, handler: this.restoreDatabase },
         { event: AppEvent.switchUserKeymap, handler: this.switchUserKeymap },
+        { event: AppEvent.pasteAsNewRows, handler: this.pasteAsNewRowsWrongTabCheck },
       ]
     },
     lastTab() {
@@ -971,10 +972,12 @@ export default Vue.extend({
       const notyQueue = 'export-query'
       this.$noty.info('Exporting query',  { queue: notyQueue })
 
+      const fullQuery = await this.$store.dispatch('data/queries/findOne', query.id);
+
       try {
         const saved = await window.main.fileHelpers.save({
           fileName: lastExportPath,
-          content: query.text,
+          content: fullQuery.text,
           filters: [
             { name: 'SQL (*.sql)', extensions: ['sql'] },
             { name: 'All Files (*.*)', extensions: ['*'] },
@@ -996,6 +999,13 @@ export default Vue.extend({
     },
     switchUserKeymap(value) {
       this.$store.dispatch('settings/save', { key: 'keymap', value: value });
+    },
+    pasteAsNewRowsWrongTabCheck() {
+      // The active table's Data tab handles this itself. Anywhere else, the
+      // action isn't applicable, so surface a hint.
+      if (this.activeTab?.tabType !== 'table') {
+        this.$noty.error("Paste as new rows is only available in a table's Data tab")
+      }
     },
     openTableBuilder() {
       if (this.connectionType === 'mongodb') {
@@ -1112,7 +1122,7 @@ export default Vue.extend({
       if (unsavedTabs.length > 0) {
         const confirmed = await this.$confirm(
           'Close all tabs?',
-          `You have ${unsavedTabs.length} unsaved ${window.main.pluralize('tab', unsavedTabs.length)}. Are you sure?`
+          `You have ${unsavedTabs.length} unsaved ${this.$pluralize('tab', unsavedTabs.length)}. Are you sure?`
         )
         if (!confirmed) return
       }
@@ -1124,7 +1134,7 @@ export default Vue.extend({
       if (unsavedTabs.length > 0) {
         const confirmed = await this.$confirm(
           'Close other tabs?',
-          `You have ${unsavedTabs.length} unsaved ${window.main.pluralize('tab', unsavedTabs.length)}. Are you sure?`
+          `You have ${unsavedTabs.length} unsaved ${this.$pluralize('tab', unsavedTabs.length)}. Are you sure?`
         )
         if (!confirmed) return
       }
@@ -1144,7 +1154,7 @@ export default Vue.extend({
       if (unsavedTabs.length > 0) {
         const confirmed = await this.$confirm(
           'Close tabs to the right?',
-          `You have ${unsavedTabs.length} unsaved ${window.main.pluralize('tab', unsavedTabs.length)} to be closed. Are you sure?`
+          `You have ${unsavedTabs.length} unsaved ${this.$pluralize('tab', unsavedTabs.length)} to be closed. Are you sure?`
         )
         if (!confirmed) return
       }
