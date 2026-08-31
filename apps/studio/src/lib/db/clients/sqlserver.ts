@@ -2,7 +2,6 @@
 import { readFileSync } from 'fs';
 import { parse as bytesParse } from 'bytes'
 import sql, { ConnectionError, ConnectionPool, IColumnMetadata, IRecordSet, Request, Transaction } from 'mssql'
-import { identify } from 'sql-query-identifier'
 import knexlib from 'knex'
 import BksConfig from "@/common/bksConfig";
 import _ from 'lodash'
@@ -31,13 +30,12 @@ import {
   ExecutionContext,
   QueryLogOptions
 } from './BasicDatabaseClient'
-import { FilterOptions, OrderBy, TableFilter, ExtendedTableColumn, TableIndex, TableProperties, TableResult, StreamResults, Routine, TableOrView, NgQueryResult, DatabaseFilterOptions, TableChanges, ImportFuncOptions, DatabaseEntity, BksFieldType, BksField } from '../models';
+import { FilterOptions, OrderBy, TableFilter, ExtendedTableColumn, TableIndex, TableProperties, TableResult, StreamResults, Routine, TableOrView, NgQueryResult, DatabaseFilterOptions, TableChanges, ImportFuncOptions, DatabaseEntity, BksFieldType, BksField, IncludedFilterTypes } from '../models';
 import { AlterTableSpec, IndexAlterations, RelationAlterations } from '@shared/lib/dialects/models';
 import { AzureAuthService } from '../authentication/azure';
 import { IDbConnectionServer } from '../backendTypes';
 import { GenericBinaryTranscoder } from '../serialization/transcoders';
 import { IdentifyResult } from 'sql-query-identifier/lib/defines';
-import { safelyIdentify } from '../sql_tools';
 const log = logRaw.scope('sql-server')
 
 const D = SqlServerData
@@ -83,6 +81,7 @@ type SQLServerResult = {
 interface ExecuteOptions {
   arrayRowMode?: boolean
   connection?: Request
+  tabId?: number
 }
 
 const SQLServerContext = {
@@ -218,17 +217,37 @@ export class SQLServerClient extends BasicDatabaseClient<SQLServerResult, Transa
     return this.version.versionString.split(" \n\t")[0]
   }
 
-  async executeQuery(queryText: string, options: ExecuteOptions = {}) {
-    // NOTE (@day): we were apparently not even setting multiple on the request, so this is gonna be single for now
-    const { data, rowsAffected } = await this.driverExecuteSingle(queryText, options);
+  async executeQuery(queryText: string, options: ExecuteOptions = {}): Promise<NgQueryResult[]> {
+    const commands = this.identifyCommands(queryText);
 
-    const commands = this.identifyCommands(queryText)
+    const results: NgQueryResult[] = [];
 
-    // Executing only non select queries will not return results.
-    // So we "fake" there is at least one result.
-    const results = !data.recordsets.length && rowsAffected > 0 ? [[] as any] : data.recordsets as IRecordSet<any>
+    for (const query of commands) {
+      if (query.executionType === 'TRANSACTION' && !_.isNil(options.tabId)) {
+        switch (query.type) {
+          case "BEGIN_TRANSACTION":
+            await this.startTransaction(options.tabId);
+            break;
+          case "COMMIT":
+            await this.commitTransaction(options.tabId);
+            break;
+          case "ROLLBACK":
+            await this.rollbackTransaction(options.tabId);
+            break;
+        }
+        continue;
+      }
 
-    return results.map((result, idx) => this.parseRowQueryResult(result, rowsAffected, commands[idx], result?.columns, options.arrayRowMode))
+      const { data, rowsAffected } = await this.driverExecuteSingle(query.text, options);
+
+      const raw = !data.recordsets.length && rowsAffected > 0 ? [[] as any] : data.recordsets as IRecordSet<any>
+
+      const parsed = raw.map((result) => this.parseRowQueryResult(result, rowsAffected, query, result?.columns, options.arrayRowMode))
+
+      results.push(...parsed);
+    }
+
+    return results;
   }
 
   async query(queryText: string, tabId: number) {
@@ -238,7 +257,11 @@ export class SQLServerClient extends BasicDatabaseClient<SQLServerResult, Transa
     return {
       execute: async(): Promise<NgQueryResult[]> => {
         try {
-          return await this.executeQuery(queryText, { arrayRowMode: true, connection: queryRequest })
+          return await this.executeQuery(queryText, {
+            arrayRowMode: true,
+            connection: queryRequest,
+            tabId
+          })
         } catch (err) {
           if (err.code === mmsqlErrors.CANCELED) {
             err.sqlectronError = 'CANCELED_BY_USER';
@@ -257,7 +280,7 @@ export class SQLServerClient extends BasicDatabaseClient<SQLServerResult, Transa
     }
   }
 
-  async selectTop(table: string, offset: number, limit: number, orderBy: OrderBy[], filters: string | TableFilter[], schema?: string, selects = ['*']): Promise<TableResult> {
+  async selectTop(table: string, offset: number, limit: number, orderBy: OrderBy[], filters: string | TableFilter[], schema: string = this._defaultSchema, selects = ['*']): Promise<TableResult> {
     this.logger().debug("filters", filters)
     const query = await this.selectTopSql(table, offset, limit, orderBy, filters, schema, selects)
     this.logger().debug(query)
@@ -275,7 +298,7 @@ export class SQLServerClient extends BasicDatabaseClient<SQLServerResult, Transa
     limit: number,
     orderBy: OrderBy[],
     filters: string | TableFilter[],
-    schema?: string,
+    schema: string = this._defaultSchema,
     selects?: string[]
   ) {
     return this.version.supportOffsetFetch
@@ -327,7 +350,7 @@ export class SQLServerClient extends BasicDatabaseClient<SQLServerResult, Transa
     }))
   }
 
-  async getPrimaryKey(table: string, schema: string) {
+  async getPrimaryKey(table: string, schema: string = this._defaultSchema) {
     const res = await this.getPrimaryKeys(table, schema)
     return res.length === 1 ? res[0].columnName : null
   }
@@ -392,7 +415,7 @@ export class SQLServerClient extends BasicDatabaseClient<SQLServerResult, Transa
     const triggers = await this.listTableTriggers(table, schema)
     const indexes = await this.listTableIndexes(table, schema)
     const description = await this.getTableDescription(table, schema)
-    const qualified = `${D.wrapIdentifier(schema)}.${D.wrapIdentifier(table)}`;
+    const qualified = `${this.wrapIdentifier(schema)}.${this.wrapIdentifier(table)}`;
     const sizeQuery = `EXEC sp_spaceused N'${escapeString(qualified)}'; `
     const { data }  = await this.driverExecuteSingle(sizeQuery, { overrideReadonly: true })
     const row = data.recordset ? data.recordset[0] || {} : {}
@@ -407,7 +430,7 @@ export class SQLServerClient extends BasicDatabaseClient<SQLServerResult, Transa
     }
   }
 
-  async getOutgoingKeys(table: string, schema?: string) {
+  async getOutgoingKeys(table: string, schema: string = this._defaultSchema) {
     // Simplified approach to get foreign keys with ordinal position for proper ordering in composite keys
     const sql = `
       SELECT
@@ -493,7 +516,7 @@ export class SQLServerClient extends BasicDatabaseClient<SQLServerResult, Transa
     return result;
   }
 
-  async getIncomingKeys(table: string, schema?: string) {
+  async getIncomingKeys(table: string, schema: string = this._defaultSchema) {
     // Query for foreign keys TO this table (incoming - other tables referencing this table)
     const sql = `
       SELECT
@@ -606,13 +629,13 @@ export class SQLServerClient extends BasicDatabaseClient<SQLServerResult, Transa
       return ''
     }
 
-    elementName = this.wrapValue(`${D.wrapIdentifier(schema)}.${D.wrapIdentifier(elementName)}`)
+    elementName = this.wrapValue(`${this.wrapIdentifier(schema)}.${this.wrapIdentifier(elementName)}`)
     newElementName = this.wrapValue(newElementName)
 
     return `EXEC sp_rename ${elementName}, ${newElementName};`
   }
 
-  async dropElement (elementName: string, typeOfElement: DatabaseElement, schema = 'dbo') {
+  async dropElement (elementName: string, typeOfElement: DatabaseElement, schema: string = this._defaultSchema) {
     const sql = `DROP ${D.wrapLiteral(typeOfElement)} ${this.wrapIdentifier(schema)}.${this.wrapIdentifier(elementName)}`
     await this.driverExecuteSingle(sql)
   }
@@ -695,9 +718,7 @@ export class SQLServerClient extends BasicDatabaseClient<SQLServerResult, Transa
     return runQuery(options.connection ? options.connection : this.pool.request());
   }
 
-  async truncateAllTables() {
-    const schema = await this.getSchema()
-
+  async truncateAllTables(schema: string = this._defaultSchema) {
     const sql = `
       SELECT table_name
       FROM INFORMATION_SCHEMA.TABLES
@@ -716,11 +737,11 @@ export class SQLServerClient extends BasicDatabaseClient<SQLServerResult, Transa
     await this.driverExecuteSingle(truncateAll);
   }
 
-  async truncateElementSql(elementName: string, typeOfElement: DatabaseElement, schema = 'dbo') {
+  async truncateElementSql(elementName: string, typeOfElement: DatabaseElement, schema: string = this._defaultSchema) {
     return `TRUNCATE ${D.wrapLiteral(typeOfElement)} ${this.wrapIdentifier(schema)}.${this.wrapIdentifier(elementName)}`
   }
 
-  async duplicateTable(tableName: string, duplicateTableName: string, schema = 'dbo') {
+  async duplicateTable(tableName: string, duplicateTableName: string, schema: string = this._defaultSchema) {
     // duplicateTableSql produces a `SELECT ... INTO` statement. The query
     // identifier classifies that as a plain SELECT, so the read-only guard in
     // driverExecuteSingle never trips even though it creates a table. Enforce
@@ -734,7 +755,7 @@ export class SQLServerClient extends BasicDatabaseClient<SQLServerResult, Transa
     await this.driverExecuteSingle(sql)
   }
 
-  async duplicateTableSql(tableName: string, duplicateTableName: string, schema) {
+  async duplicateTableSql(tableName: string, duplicateTableName: string, schema: string = this._defaultSchema) {
     return `SELECT * INTO ${this.wrapIdentifier(schema)}.${this.wrapIdentifier(duplicateTableName)} FROM ${this.wrapIdentifier(schema)}.${this.wrapIdentifier(tableName)}`
   }
 
@@ -922,18 +943,18 @@ export class SQLServerClient extends BasicDatabaseClient<SQLServerResult, Transa
     }
   }
 
-  async getQuerySelectTop(table: string, limit: number): Promise<string> {
-    return `SELECT TOP ${limit} * FROM ${this.wrapIdentifier(table)}`;
+  async getQuerySelectTop(table: string, limit: number, schema: string = this._defaultSchema): Promise<string> {
+    return `SELECT TOP ${limit} * FROM ${this.wrapIdentifier(schema)}.${this.wrapIdentifier(table)}`;
   }
 
-  async getTableCreateScript(table: string): Promise<string> {
+  async getTableCreateScript(table: string, schema: string = this._defaultSchema): Promise<string> {
     // Reference http://stackoverflow.com/a/317864
     const sql = `
-      SELECT  ('CREATE TABLE ' + so.name + ' (' +
+      SELECT  ('CREATE TABLE ${this.wrapIdentifier(schema)}.' + so.name + ' (' +
         CHAR(13)+CHAR(10) + REPLACE(o.list, '&#x0D;', CHAR(13)) +
         ')' + CHAR(13)+CHAR(10) +
         CASE WHEN tc.constraint_name IS NULL THEN ''
-             ELSE + CHAR(13)+CHAR(10) + 'ALTER TABLE ' + so.Name +
+             ELSE + CHAR(13)+CHAR(10) + 'ALTER TABLE ${this.wrapIdentifier(schema)}.' + so.Name +
              ' ADD CONSTRAINT ' + tc.constraint_name  +
              ' PRIMARY KEY ' + '(' + LEFT(j.list, Len(j.list)-1) + ')'
         END) AS createtable
@@ -973,12 +994,15 @@ export class SQLServerClient extends BasicDatabaseClient<SQLServerResult, Transa
                  THEN ' DEFAULT '+ INFORMATION_SCHEMA.COLUMNS.column_default
                  ELSE ''
             END + ',' + CHAR(13)+CHAR(10)
-         FROM INFORMATION_SCHEMA.COLUMNS WHERE table_name = so.name
+         FROM INFORMATION_SCHEMA.COLUMNS
+         WHERE table_name = so.name
+         AND table_schema = '${schema}'
          ORDER BY ordinal_position
          FOR XML PATH('')
       ) o (list)
       LEFT JOIN INFORMATION_SCHEMA.TABLE_CONSTRAINTS tc
       ON  tc.table_name       = so.name
+      AND tc.table_schema     = '${schema}'
       AND tc.constraint_type  = 'PRIMARY KEY'
       CROSS APPLY
           (SELECT column_name + ', '
@@ -989,7 +1013,7 @@ export class SQLServerClient extends BasicDatabaseClient<SQLServerResult, Transa
           ) j (list)
       WHERE   xtype = 'U'
       AND name    NOT IN ('dtproperties')
-      AND so.name = '${table}'
+      AND so.id = OBJECT_ID('${schema}.${table}')
     `
 
     const { data } = await this.driverExecuteSingle(sql)
@@ -997,8 +1021,8 @@ export class SQLServerClient extends BasicDatabaseClient<SQLServerResult, Transa
     return data.recordset.map((row) => row.createtable)[0]
   }
 
-  async getViewCreateScript(view: string) {
-    const sql = `SELECT OBJECT_DEFINITION (OBJECT_ID('${view}')) AS ViewDefinition;`;
+  async getViewCreateScript(view: string, schema: string = this._defaultSchema) {
+    const sql = `SELECT OBJECT_DEFINITION (OBJECT_ID('${schema}.${view}')) AS ViewDefinition;`;
 
     const { data } = await this.driverExecuteSingle(sql);
 
@@ -1009,11 +1033,11 @@ export class SQLServerClient extends BasicDatabaseClient<SQLServerResult, Transa
     return []
   }
 
-  async getRoutineCreateScript(routine: string) {
+  async getRoutineCreateScript(routine: string, _type: string, schema: string = this._defaultSchema) {
     const sql = `
       SELECT definition
       FROM sys.sql_modules
-      WHERE OBJECT_NAME(object_id) = '${routine}'
+      WHERE object_id = OBJECT_ID('${schema}.${routine}')
     `
 
     const { data } = await this.driverExecuteSingle(sql)
@@ -1152,7 +1176,7 @@ export class SQLServerClient extends BasicDatabaseClient<SQLServerResult, Transa
       restore: false,
       indexNullsNotDistinct: false,
       transactions: true,
-      filterTypes: ['standard']
+      filterTypes: ['standard' as IncludedFilterTypes]
     }
   }
 
@@ -1584,13 +1608,6 @@ export class SQLServerClient extends BasicDatabaseClient<SQLServerResult, Transa
       select count(*) as total ${baseSQL}
     `
     return countQuery
-  }
-
-  private async getSchema() {
-    const sql = 'SELECT schema_name() AS \'schema\''
-    const { data } = await this.driverExecuteSingle(sql)
-
-    return (data.recordsets[0] as any).schema
   }
 
   private async listDefaultConstraints(table: string, schema: string = this._defaultSchema) {
