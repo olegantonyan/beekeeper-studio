@@ -18,6 +18,14 @@ node -v
 # stripped from the staged source tree (ignore_source_files).
 export HUSKY=0
 
+# rpmbuild exports the distro's own CFLAGS/CXXFLAGS/LDFLAGS into %install and
+# node-gyp picks them up for every native module. They don't belong here: LTO plus
+# the annobin/hardened specs make the addon builds slow and memory-hungry (EL10
+# fails outright), and EL10's -march=x86-64-v3 would require AVX2 from modules that
+# sit next to generic prebuilt electron binaries. deb builds already compile them
+# with node-gyp's defaults; do the same for rpm.
+unset CFLAGS CXXFLAGS CPPFLAGS LDFLAGS FFLAGS FCFLAGS
+
 # Workspace install. apps/studio's postinstall runs `electron-builder
 # install-app-deps`, rebuilding the native modules (better-sqlite3, oracledb)
 # against Electron's ABI rather than the system Node ABI.
