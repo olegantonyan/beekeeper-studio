@@ -52,7 +52,8 @@ We welcome community contributions!
 | [Trino](https://trino.io/) / [Presto](https://prestodb.io/) | ⭐ Full Support                |           |    ✅    |    [Features](https://www.beekeeperstudio.io/db/trino-client/), [Docs](https://docs.beekeeperstudio.io/user_guide/connecting/trino/) |
 | [SurrealDB](https://surrealdb.com/)                      | ⭐ Full Support               |           |    ✅    |      [Docs](https://docs.beekeeperstudio.io/user_guide/connecting/surrealdb) |
 | [DynamoDB](https://aws.amazon.com/dynamodb/)             | 🧪 Beta Support               |           |    ✅    |      [Features](https://www.beekeeperstudio.io/db/dynamodb-client/), [Docs](https://docs.beekeeperstudio.io/user_guide/connecting/dynamodb) |
-| [Snowflake](https://www.snowflake.com/)                  | ⏳ Coming Soon                |           |    ✅    |   -- |
+| [Snowflake](https://www.snowflake.com/)                 | ⭐ Full Support               |           |    ✅    |   [Docs](https://docs.beekeeperstudio.io/user_guide/connecting/snowflake) |
+| [SAP HANA](https://www.sap.com/products/technology-platform/hana.html) | ⏳ Coming Soon  |           |    ✅    |   -- |
 
 
 
@@ -115,6 +116,8 @@ Beekeeper Studio Community Edition (the code in this repository) is licensed und
 Beekeeper Studio Ultimate Edition contains extra features and is licensed under a [commercial end user agreement (EULA)](https://beekeeperstudio.io/legal/commercial-eula/).
 
 Beekeeper Studio's trademarks (words marks and logos) are not open source. See our [trademark guidelines](https://beekeeperstudio.io/legal/trademark/) for more information.
+
+Third party assets bundled with the app, such as the database icons, are credited in [ATTRIBUTIONS.md](./ATTRIBUTIONS.md).
 
 ## Trademark Guidelines
 
